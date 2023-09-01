@@ -1070,3 +1070,390 @@
    (seval (fmt #t "Jak 2 Mode\n"))
    )
   )
+
+ (defsmacro with-gensym-defaults (bindings &rest body)
+  "calls with-gensyms, but calls set! on the symbols to set them to their default values and then splices the body in after that."
+  (let ((gensyms (apply (lambda (binding) (car binding)) bindings))
+        (defaults (apply (lambda (binding) (cadr binding)) bindings))
+        )
+    `(with-gensyms ,gensyms
+       ,@(apply-i (lambda (gen-sym i) `(set! ,gen-sym '())) gensyms)
+       ,@body
+       )
+    )
+ )
+
+
+ ;;;;;;;;;;;;;;;;;;;
+ ;;; Defclass
+ ;;;;;;;;;;;;;;;;;;;
+
+ (defmacro defnew (type-to-make bindings &rest body)
+  "Defines the new method, which allocates a new instance of the type and returns it"
+  `(defmethod new ,type-to-make ((allocation symbol) (new-type type) ,@bindings)
+    (let ((self (object-new allocation new-type (the-as int (-> new-type size)))))
+      ,@body
+      self
+     )
+   )
+ )
+
+(seval (define current-method-name 'none))
+(seval (define current-hook-name 'none))
+(seval (define current-parent-type 'none))
+
+(defmacro call-parent-method (method &key (parent #f) &rest params)
+  "Call the given method on this class's parent type with the given params. Optionally accepts an arbitrary :parent."
+  `(let ((parent-method (method-of-type ,(if (eq? parent #f) current-parent-type parent) ,method)))
+      (parent-method ,@params)
+    )
+ )
+
+(defmacro super (&rest params)
+  "Call this method or state hook on this class's parent type with the given params."
+  (if (eq? current-hook-name 'none)
+    `(let ((parent-method (method-of-type ,current-parent-type ,current-method-name)))
+        (if parent-method
+          (parent-method ,@params)
+         )
+      )
+    `(let ((parent-method (-> (method-of-type ,current-parent-type ,current-method-name) ,current-hook-name)))
+        (if parent-method
+          (parent-method ,@params)
+        )
+      )
+  )
+ )
+
+(defmacro self (&rest args)
+  "Simply flips the arguments for convenience.
+   (self a-field) is the same as (a-field self), and accessor macro produces (-> self a-field) 
+   (self a-method bar) is the same as (a-method self bar)."
+   (if (eq? (length args) 1)
+     `(,(car args) self)
+     `(,(car args) self ,@(cdr args))
+     )
+)
+
+;; The following are used for producing the accessor macros. There is probably a way to avoid this
+(desfun concat-lists (l1 l2)
+  (if (eq? l1 '())
+      l2
+      (cons (car l1) (concat-lists (cdr l1) l2))))
+
+(desfun splice-into-list-helper (base-list splicing-list)
+  (if (eq? splicing-list '())
+      base-list
+      (splice-into-list-helper (concat-lists base-list (list (car splicing-list))) (cdr splicing-list))))
+
+(desfun splice-into-list (base-list splicing-list)
+  (reverse (splice-into-list-helper base-list splicing-list)))
+
+(defmacro defclass (type parent-type &rest elements)
+  "deftype that supports declaring fields, methods,
+   behaviors, states, skelgroups, options, other
+   classes, definitions, and enums within the type.
+   - Automatically predeclares methods and states as needed (won't redeclare :override methods/states)
+      - Note that it parses the method definition for the return type and parameter types
+   - Automatically injects (self _type_) as the first parameter into methods to be consistent with behaviors
+   - Supports (call-parent-method) and (super) which also work in state hooks!
+   - Declares enums, definitions, and skelgroups before the type
+   - Automatically declares accessor macros for each field.
+     - This let's you call (foo self) instead of (-> self foo)
+   - (self) macro that flips the arguments for convenience. 
+     - This let's you call (self foo x) instead of (foo self x)
+     - This works for both methods and fields because of the accessor macros
+   "
+  (with-gensyms
+    (fields
+     methods 
+     override-methods  
+     behaviors  
+     states    
+     state-methods 
+     override-states
+     skelgroups 
+     options    
+     types
+     definitions
+     enums
+    )
+    (set! fields '())
+    (set! methods '())
+    (set! override-methods '())
+    (set! behaviors '())
+    (set! states '())
+    (set! state-methods '())
+    (set! override-states '())
+    (set! skelgroups '())
+    (set! options '())
+    (set! types '())
+    (set! definitions '())
+    (set! enums '())
+    
+    ;; Collect elements based on the type tag
+    (apply (lambda (element)
+             (cond
+              ((string? element)
+                ;; docstrings can be placed before any element, ignored for now
+                #f)
+              ((eq? (car element) (string->symbol ":fields")) 
+               (set! fields (cdr element)))
+              ((eq? (car element) (string->symbol ":methods"))
+               (set! methods (cdr element)))
+              ((and (eq? (car element) (string->symbol ":override")) (eq? (cadr element) (string->symbol "methods")))
+               (set! override-methods (cddr element)))
+              ((eq? (car element) (string->symbol ":behaviors")) 
+               (set! behaviors (cdr element)))
+              ((eq? (car element) (string->symbol ":states")) 
+               (set! states (cdr element)))
+              ((eq? (car element) (string->symbol ":state-methods")) 
+               (set! state-methods (cdr element)))
+              ((and (eq? (car element) (string->symbol ":override")) (eq? (cadr element) (string->symbol "states")))
+               (set! override-states (cddr element)))
+              ((eq? (car element) (string->symbol ":skelgroups")) 
+               (set! skelgroups (cdr element)))
+              ((eq? (car element) (string->symbol ":options")) 
+               (set! options (cdr element)))
+              ((eq? (car element) (string->symbol ":types")) 
+               (set! types (cdr element)))
+              ((eq? (car element) (string->symbol ":definitions"))
+               (set! definitions (cdr element)))
+              ((eq? (car element) (string->symbol ":enums"))
+               (set! enums (cdr element)))
+              (#t 
+               ;; Did not have any tag, so we assume it's a fields list
+               ;; TODO: Check for unsupported tags and print a warning 
+               (set! fields element)))
+             )
+           elements)
+
+    ;; Define all of the elements that were collected 
+    `(begin
+        ;; predeclare parent type
+        (declare-type ,type ,@(if (eq? parent-type '()) `(basic) parent-type))
+        
+        ,@(apply (lambda (enum)
+            `(defenum ,(car enum) ,@(cdr enum))
+            )
+          enums)
+
+        ,@(apply (lambda (definition)
+                    `(define ,(car definition) ,(cadr definition))
+                  )
+          definitions)
+
+          ,@(apply 
+              (lambda (field)
+                (let ((field-name (car field)))
+                  `(defmacro ,field-name (&rest args)
+                      (reverse (splice-into-list (list '-> (car args) ',field-name) (cdr args)))
+                    )
+                  )
+              )
+             fields
+            )
+     
+        ,@(apply (lambda (skelgroup)
+                  ;; defskelgroup name             art-name                joint geom            joint-anim
+                  `(defskelgroup ,(car skelgroup) ,(car (cdr skelgroup)) ,(car (cddr skelgroup)) ,(car (cdddr skelgroup))
+                    ;; skelgroup body
+                    ,@(cdr (cdddr skelgroup))
+                    )
+                  )
+                skelgroups)
+         
+        ,@(apply (lambda (type)
+                  `(defclass ,(car type) ,(cadr type)
+                    ;; method body
+                    ,@(cddr type)
+                    )
+                  )
+                types)
+
+        (seval (define current-method-name 'none))
+        (seval (define current-parent-type ',(if (eq? parent-type '()) basic (car parent-type))))
+         
+        (deftype ,type ,(if (eq? parent-type '()) `(basic) parent-type)
+          ,fields
+        
+        ,@(if (or (not (eq? state-methods '())) (not (eq? methods '())))
+          `((:methods
+            ,@(apply (lambda (state-method)
+                      `(,(car state-method) ,(apply (lambda (param-pair) param-pair) (cadr state-method)) _type_ :state #t)
+                     )
+                    state-methods)
+
+            ,@(apply (lambda (method)
+                      (if (eq? (car method) 'new)
+                        `(new (symbol type ,@(apply (lambda (param-pair) (caadr param-pair)) (cadr method))) ,type 0)
+                        ;;                                       name                  parameter types                                                 return type  
+                        `(,(car method) (_type_ ,@(apply (lambda (param-pair) (cadr param-pair)) (cadr method))) ,@(caddr method)) ;;(if (eq? (car method) 'override) '(()) 
+                      ) 
+                    )
+                    methods)
+            ))
+            '()
+          )
+
+          ,@(if (not (eq? states '()))
+            `((:states
+              ,@(apply (lambda (state)
+                        ;;  name
+                        `(,(car state))
+                      ) 
+                    states)
+              ))
+              '()
+          )
+         ,@options
+        )
+
+        ,@(apply (lambda (overridden-method)
+                  `(begin 
+                    (seval (set! current-method-name ',(car overridden-method)))
+                    (seval (set! current-hook-name 'none))
+                    ;;            name                        parameter types  return type  
+                    (defmethod ,(car overridden-method) ,type ((self ,type) ,@(cadr overridden-method))
+                        ;; method body
+                        ,@(cdddr overridden-method)
+                      )
+                  )
+              )
+            override-methods)
+                  
+
+        ,@(apply (lambda (method)
+                    (if (eq? (car method) 'new)
+                       `(begin 
+                          (seval (set! current-method-name ',(car method)))
+                          (defnew ,type (,@(cadr method))
+                            ,@(cddr method)    
+                          )
+                       )
+                        ;;            name               parameter types  return type  
+                       `(begin (defmethod ,(car method) ,type ((self ,type) ,@(cadr method))
+                          (seval (set! current-method-name ',(car method)))
+                          ;; method body
+                          ,@(cdddr method)
+                        )
+                       )
+                      )
+                    )
+                    methods)
+         
+        ,@(apply (lambda (behavior)
+                    ;; defbehavior name         type  parameters       
+                    `(defbehavior ,(car behavior) ,type ,(cadr behavior)
+                      ;; body
+                      ,@(cddr behavior)
+                      )
+                    )
+                  behaviors)
+
+        ,@(apply (lambda (override-state)
+                    `(begin
+                       (seval (set! current-method-name ',(car override-state)))
+                       
+                      ;; defstate name         type       
+                       (defstate ,(car override-state) (,type) :virtual #t
+                         ;,(cadr override-state)
+                         ,@(apply (lambda (element)
+                                  ;; Save each hook at compile time
+                                  (cond
+                                    ((eq? element (string->symbol ":event"))
+                                        (set! current-hook-name 'event)
+                                        ':event
+                                    )
+                                    ((eq? element (string->symbol ":enter"))
+                                          (set! current-hook-name 'enter)
+                                          ':enter
+                                    )
+                                    ((eq? element (string->symbol ":trans")) 
+                                      
+                                        (set! current-hook-name 'trans)
+                                        ':trans
+                                      
+                                    )
+                                    ((eq? element (string->symbol ":code")) 
+                                       
+                                        (set! current-hook-name 'code)
+                                       ':code
+                                      
+                                    )
+                                    ((eq? element (string->symbol ":exit"))
+                                        (set! current-hook-name 'exit)
+                                        ':exit
+                                      
+                                    )
+                                    ;; 
+                                    ((eq? (car element) (string->symbol "behavior"))
+                                        (list
+                                          (car element)
+                                          (cadr element)
+                                          `(seval (set! current-hook-name ',current-hook-name))
+                                          `(begin ,@(cddr element))
+                                        )
+                                    )
+                                    (#t
+                                      element
+                                    )
+                                    )
+                                 )
+                                
+                                ;; body
+                                (cdr override-state)
+                                )
+                        ;; body
+                      ;;  ,@(cdr override-state)
+                        )
+                      )
+                    )
+                    override-states)
+         
+        ,@(apply (lambda (state)
+                      ;; defstate name         type       
+                      `(defstate ,(car state) (,type)
+                        ;; body
+                        ,@(cdr state)
+                        )
+                      )
+                    states)
+
+        ,@(apply (lambda (state-method)
+                      `(seval (set! current-method-name ',(car state-method)))
+                      ;; defstate name         type       
+                      `(defstate ,(car state-method) (,type) :virtual #t
+                        ;  ,(cadr state-method)
+                          ,@(apply (lambda (element)
+                                  (begin (cond
+                                    ((eq? element (string->symbol ":event")) 
+                                      (seval (set! current-hook-name 'event))
+                                    )
+                                    ((eq? element (string->symbol ":enter"))
+                                      (seval (set! current-hook-name 'enter))
+                                    )
+                                    ((eq? element (string->symbol ":trans")) 
+                                      (seval (set! current-hook-name 'trans))
+                                    )
+                                    ((eq? element (string->symbol ":code")) 
+                                      (seval (set! current-hook-name 'code))
+                                    )
+                                    ((eq? element (string->symbol ":exit"))
+                                      (seval (set! current-hook-name 'exit))
+                                    )
+                                    )
+                                    element
+                                  )
+                                 )
+                                ;; body
+                                (cddr state-method)
+                                )
+                        ;; body
+                       ;; ,@(cddr state-method)
+                        )
+                      )
+                    state-methods)
+       )
+     )
+  )
