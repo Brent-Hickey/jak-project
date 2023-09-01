@@ -1071,19 +1071,6 @@
    )
   )
 
- (defsmacro with-gensym-defaults (bindings &rest body)
-  "calls with-gensyms, but calls set! on the symbols to set them to their default values and then splices the body in after that."
-  (let ((gensyms (apply (lambda (binding) (car binding)) bindings))
-        (defaults (apply (lambda (binding) (cadr binding)) bindings))
-        )
-    `(with-gensyms ,gensyms
-       ,@(apply-i (lambda (gen-sym i) `(set! ,gen-sym '())) gensyms)
-       ,@body
-       )
-    )
- )
-
-
  ;;;;;;;;;;;;;;;;;;;
  ;;; Defclass
  ;;;;;;;;;;;;;;;;;;;
