@@ -14,6 +14,7 @@ class CompilerSettings {
   bool emit_move_after_return = true;
   bool check_for_requires = false;  // check for missing 'require' statements (TODO - does not work
                                     // for virtual state usages or macro usages)
+  bool enable_peephole_optimization = true;   // enable optional IR peephole optimization pass
 
   void set(const std::string& name, const goos::Object& value);
 

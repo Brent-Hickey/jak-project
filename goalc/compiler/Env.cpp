@@ -3,6 +3,8 @@
 #include <stdexcept>
 
 #include "IR.h"
+#include "PeepholeOptimizer.h"
+#include "CompilerSettings.h"
 
 #include "common/goos/Reader.h"
 #include "common/log/log.h"
@@ -233,6 +235,42 @@ void FunctionEnv::emit(const goos::Object& form, std::unique_ptr<IR> ir, Env* lo
 
 void FunctionEnv::finish() {
   resolve_gotos();
+  // Note: This version is for backward compatibility
+  // Peephole optimization will be done later, right before register allocation
+}
+
+void FunctionEnv::finish(const CompilerSettings& settings) {
+  resolve_gotos();
+  // Note: Peephole optimization will be done later, right before register allocation
+  (void)settings; // Suppress unused parameter warning for now
+}
+
+void FunctionEnv::run_peephole_optimization(const CompilerSettings& settings) {
+  // Run optional peephole optimization pass right before register allocation
+  if (settings.enable_peephole_optimization) {
+    // Skip optimization for empty functions or problematic cases
+    if (m_code.empty()) {
+      return;
+    }
+    
+    // Skip optimization for inline assembly functions which might have special constraints
+    if (is_asm_func) {
+      return;
+    }
+    
+    try {
+      // Apply peephole optimizations to the IR sequence
+      PeepholeOptimizer optimizer;
+      auto stats = optimizer.optimize(m_code, this);
+      if (stats.total_optimizations() > 0) {
+        lg::debug("PeepholeOptimizer: {} total optimizations in function {}", 
+                  stats.total_optimizations(), m_name);
+      }
+    } catch (const std::exception& e) {
+      // Log the error but don't fail compilation
+      lg::warn("PeepholeOptimizer: Exception in function {}: {}", m_name, e.what());
+    }
+  }
 }
 
 void FunctionEnv::resolve_gotos() {

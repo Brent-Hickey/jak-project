@@ -342,3 +342,4 @@ ValOrConstFloat Compiler::get_constant_float_or_variable(const goos::Object& in,
     }
   }
 }
+

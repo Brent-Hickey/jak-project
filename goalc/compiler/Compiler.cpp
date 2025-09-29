@@ -183,7 +183,7 @@ std::unique_ptr<FunctionEnv> Compiler::compile_top_level_function(const std::str
     fe->emit_ir<IR_Null>(code);
   }
 
-  fe->finish();
+  fe->finish(m_settings);
   return fe;
 }
 
@@ -251,6 +251,9 @@ Val* Compiler::compile_error_guard(const goos::Object& code, Env* env) {
 void Compiler::color_object_file(FileEnv* env) {
   int num_spills_in_file = 0;
   for (auto& f : env->functions()) {
+    // Run peephole optimization before register allocation
+    f->run_peephole_optimization(m_settings);
+    
     AllocationInput input;
     input.is_asm_function = f->is_asm_func;
     for (auto& i : f->code()) {

@@ -667,6 +667,59 @@ struct Instruction {
     set(sib);
   }
 
+  // Set modrm/sib for LEA with base + index * scale addressing mode
+  void set_modrm_and_rex_for_reg_plus_reg_times_scale_addr(uint8_t reg,
+                                                           uint8_t base,
+                                                           uint8_t index,
+                                                           uint8_t scale_bits,
+                                                           bool rex_w = false,
+                                                           bool rex_always = false) {
+    bool rex_b = false, rex_r = false, rex_x = false;
+    bool base_ext = false;
+    bool index_ext = false;
+
+    if (base >= 8) {
+      base_ext = true;
+      base -= 8;
+    }
+    
+    if (index >= 8) {
+      index_ext = true;
+      index -= 8;
+    }
+    
+    if (reg >= 8) {
+      rex_r = true;
+      reg -= 8;
+    }
+
+    rex_b = base_ext;
+    rex_x = index_ext;
+
+    ModRM modrm;
+    modrm.mod = 0;  // [base + index*scale] with no displacement
+    modrm.reg_op = reg;
+    modrm.rm = 4;   // SIB follows
+    
+    SIB sib;
+    sib.scale = scale_bits;
+    sib.index = index;
+    sib.base = base;
+    
+    // Handle special case where base is RBP/R13 (reg 5)
+    if (base == 5) {
+      modrm.mod = 1;  // We need a disp8
+      set_disp(Imm(1, 0));
+    }
+    
+    if (rex_b || rex_w || rex_r || rex_x || rex_always) {
+      set(REX(rex_w, rex_r, rex_x, rex_b));
+    }
+    
+    set(modrm);
+    set(sib);
+  }
+
   void set_vex_modrm_and_rex_for_reg_plus_reg_addr(uint8_t reg,
                                                    uint8_t addr1,
                                                    uint8_t addr2,

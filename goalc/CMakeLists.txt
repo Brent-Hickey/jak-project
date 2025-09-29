@@ -41,6 +41,8 @@ add_library(compiler
         compiler/CodeGenerator.cpp
         compiler/StaticObject.cpp
         compiler/symbol_info.cpp
+        compiler/MathOptimizer.cpp
+        compiler/PeepholeOptimizer.cpp
         compiler/compilation/Asm.cpp
         compiler/compilation/Atoms.cpp
         compiler/compilation/CompilerControl.cpp

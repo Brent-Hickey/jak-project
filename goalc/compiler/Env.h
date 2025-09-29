@@ -187,6 +187,8 @@ class FunctionEnv : public DeclareEnv {
   void set_segment(int seg) { segment = seg; }
   void emit(const goos::Object& form, std::unique_ptr<IR> ir, Env* lowest_env);
   void finish();
+  void finish(const class CompilerSettings& settings);
+  void run_peephole_optimization(const class CompilerSettings& settings);
   RegVal* make_ireg(const TypeSpec& ts, RegClass reg_class) override;
   const std::vector<std::unique_ptr<IR>>& code() const { return m_code; }
   const std::vector<goos::Object>& code_source() const { return m_code_debug_source; }

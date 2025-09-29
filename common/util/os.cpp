@@ -97,13 +97,29 @@ void setup_cpu_info() {
     int result[4];
     __cpuidex(result, 1, 0);
     gCpuInfo.has_avx = result[2] & (1 << 28);
+    gCpuInfo.has_fma = result[2] & (1 << 12);  // FMA3 bit in ECX
   }
+
+#ifdef __APPLE__
+  // On macOS, check if we're running on Apple Silicon under Rosetta 2
+  // Rosetta 2 can translate AVX/FMA instructions even though CPUID reports false
+  int ret = 0;
+  size_t size = sizeof(ret);
+  if (sysctlbyname("sysctl.proc_translated", &ret, &size, NULL, 0) == 0 && ret == 1) {
+    // Running under Rosetta 2 - enable AVX/FMA since Rosetta can handle them
+    printf("Running under Rosetta 2 - enabling AVX/FMA translation\n");
+    gCpuInfo.has_avx = true;
+    gCpuInfo.has_avx2 = true;
+    gCpuInfo.has_fma = true;
+  }
+#endif
 
   printf("-------- CPU Information --------\n");
   printf(" Brand: %s\n", gCpuInfo.brand.c_str());
   printf(" Model: %s\n", gCpuInfo.model.c_str());
   printf(" AVX  : %s\n", gCpuInfo.has_avx ? "true" : "false");
   printf(" AVX2 : %s\n", gCpuInfo.has_avx2 ? "true" : "false");
+  printf(" FMA  : %s\n", gCpuInfo.has_fma ? "true" : "false");
   fflush(stdout);
 
   gCpuInfo.initialized = true;

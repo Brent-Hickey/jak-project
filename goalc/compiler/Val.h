@@ -266,6 +266,9 @@ class FloatConstantVal : public Val {
   FloatConstantVal(TypeSpec ts, StaticFloat* value) : Val(std::move(ts)), m_value(value) {}
   std::string print() const override { return "float-constant-" + m_value->print(); }
   RegVal* to_reg(const goos::Object& form, Env* fe) override;
+  
+  // Accessor for optimizer use
+  float value() const { return m_value ? m_value->value : 0.0f; }
 
  protected:
   StaticFloat* m_value = nullptr;

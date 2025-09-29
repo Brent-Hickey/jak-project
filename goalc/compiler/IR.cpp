@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "common/symbols.h"
+#include "common/util/os.h"
 
 #include "goalc/emitter/IGen.h"
 
@@ -585,6 +586,8 @@ std::string IR_IntegerMath::print() {
       return fmt::format("xor {}, {}", m_dest->print(), m_arg->print());
     case IntegerMathKind::NOT_64:
       return fmt::format("not {}", m_dest->print());
+    case IntegerMathKind::NEG_64:
+      return fmt::format("neg {}", m_dest->print());
     default:
       throw std::runtime_error("Unsupported IntegerMathKind");
   }
@@ -633,6 +636,16 @@ void IR_IntegerMath::do_codegen(emitter::ObjectGenerator* gen,
       break;
     case IntegerMathKind::NOT_64:
       gen->add_instr(IGen::not_gpr64(get_reg(m_dest, allocs, irec)), irec);
+      ASSERT(!m_arg);
+      break;
+    case IntegerMathKind::NEG_64:
+      // NEG is equivalent to 0 - x
+      // Two's complement: NOT + ADD 1
+      {
+        auto dest_reg = get_reg(m_dest, allocs, irec);
+        gen->add_instr(IGen::not_gpr64(dest_reg), irec);
+        gen->add_instr(IGen::add_gpr64_imm(dest_reg, 1), irec);
+      }
       ASSERT(!m_arg);
       break;
     case IntegerMathKind::SHLV_64:
@@ -721,6 +734,9 @@ std::string IR_FloatMath::print() {
       return fmt::format("minss {}, {}", m_dest->print(), m_arg->print());
     case FloatMathKind::SQRT_SS:
       return fmt::format("sqrtss {}, {}", m_dest->print(), m_arg->print());
+    case FloatMathKind::FMA_SS:
+    case FloatMathKind::FMS_SS:
+      throw std::runtime_error("FMA/FMS operations require IR_FloatMath3, not IR_FloatMath");
     default:
       throw std::runtime_error("Unsupported FloatMathKind");
   }
@@ -768,6 +784,88 @@ void IR_FloatMath::do_codegen(emitter::ObjectGenerator* gen,
       gen->add_instr(IGen::sqrts_xmm(get_reg(m_dest, allocs, irec), get_reg(m_arg, allocs, irec)),
                      irec);
       break;
+    case FloatMathKind::FMA_SS:
+    case FloatMathKind::FMS_SS:
+      ASSERT_MSG(false, "FMA/FMS operations require IR_FloatMath3, not IR_FloatMath");
+      break;
+    default:
+      ASSERT(false);
+  }
+}
+
+/////////////////////
+// FloatMath3 (3-operand FMA/FMS)
+/////////////////////
+
+IR_FloatMath3::IR_FloatMath3(FloatMathKind kind, RegVal* dest, RegVal* arg1, RegVal* arg2)
+    : m_kind(kind), m_dest(dest), m_arg1(arg1), m_arg2(arg2) {}
+
+std::string IR_FloatMath3::print() {
+  switch (m_kind) {
+    case FloatMathKind::FMA_SS:
+      return fmt::format("vfmadd231ss {}, {}, {} ; {} = {} + ({} * {})", 
+                         m_dest->print(), m_arg1->print(), m_arg2->print(),
+                         m_dest->print(), m_dest->print(), m_arg1->print(), m_arg2->print());
+    case FloatMathKind::FMS_SS:
+      return fmt::format("vfmsub231ss {}, {}, {} ; {} = {} - ({} * {})", 
+                         m_dest->print(), m_arg1->print(), m_arg2->print(),
+                         m_dest->print(), m_dest->print(), m_arg1->print(), m_arg2->print());
+    default:
+      throw std::runtime_error("Unsupported FloatMathKind for 3-operand instruction");
+  }
+}
+
+RegAllocInstr IR_FloatMath3::to_rai() {
+  RegAllocInstr rai;
+  // reads
+  rai.read.push_back(m_dest->ireg());   // accumulator read
+  rai.read.push_back(m_arg1->ireg());
+  rai.read.push_back(m_arg2->ireg());
+  // writes
+  rai.write.push_back(m_dest->ireg());  // accumulator write
+  rai.write.push_back(m_arg1->ireg());  // mulss clobbers arg1
+  return rai;
+}
+
+void IR_FloatMath3::do_codegen(emitter::ObjectGenerator* gen,
+                               const AllocationResult& allocs,
+                               emitter::IR_Record irec) {
+  // Check if CPU supports FMA at runtime
+  static bool has_fma = get_cpu_info().has_fma;
+  
+  switch (m_kind) {
+    case FloatMathKind::FMA_SS:
+      {
+        auto arg1_reg = get_reg(m_arg1, allocs, irec);
+        auto arg2_reg = get_reg(m_arg2, allocs, irec);
+        auto dest_reg = get_reg(m_dest, allocs, irec);
+        
+        if (has_fma) {
+          // Use real FMA instruction: dest = dest + (arg1 * arg2)
+          gen->add_instr(IGen::vfmadd231ss_xmm_xmm_xmm(dest_reg, arg1_reg, arg2_reg), irec);
+        } else {
+          // Fallback to mul+add sequence
+          gen->add_instr(IGen::mulss_xmm_xmm(arg1_reg, arg2_reg), irec);
+          gen->add_instr(IGen::addss_xmm_xmm(dest_reg, arg1_reg), irec);
+        }
+        break;
+      }
+    case FloatMathKind::FMS_SS:
+      {
+        auto arg1_reg = get_reg(m_arg1, allocs, irec);
+        auto arg2_reg = get_reg(m_arg2, allocs, irec);
+        auto dest_reg = get_reg(m_dest, allocs, irec);
+        
+        if (has_fma) {
+          // Use real FMS instruction: dest = dest - (arg1 * arg2)
+          gen->add_instr(IGen::vfmsub231ss_xmm_xmm_xmm(dest_reg, arg1_reg, arg2_reg), irec);
+        } else {
+          // Fallback to mul+sub sequence
+          gen->add_instr(IGen::mulss_xmm_xmm(arg1_reg, arg2_reg), irec);
+          gen->add_instr(IGen::subss_xmm_xmm(dest_reg, arg1_reg), irec);
+        }
+        break;
+      }
     default:
       ASSERT(false);
   }
@@ -831,6 +929,10 @@ std::string Condition::print() const {
       return a->print() + " < " + b->print();
     case ConditionKind::GT:
       return a->print() + " > " + b->print();
+    case ConditionKind::ALWAYS_TRUE:
+      return "always-true";
+    case ConditionKind::ALWAYS_FALSE:
+      return "always-false";
     default:
       throw std::runtime_error("unknown condition type in GoalCondition::print()");
   }
@@ -838,8 +940,9 @@ std::string Condition::print() const {
 
 RegAllocInstr Condition::to_rai() {
   RegAllocInstr rai;
-  rai.read.push_back(a->ireg());
-  rai.read.push_back(b->ireg());
+  // Only add registers if they exist (not for ALWAYS_TRUE/FALSE)
+  if (a) rai.read.push_back(a->ireg());
+  if (b) rai.read.push_back(b->ireg());
   return rai;
 }
 
@@ -863,6 +966,18 @@ void IR_ConditionalBranch::do_codegen(emitter::ObjectGenerator* gen,
                                       emitter::IR_Record irec) {
   Instruction jump_instr(0);
   ASSERT(m_resolved);
+
+  // Handle constant conditions with no comparison needed
+  if (condition.kind == ConditionKind::ALWAYS_TRUE) {
+    // Unconditional jump - no comparison needed
+    auto jump_rec = gen->add_instr(IGen::jmp_32(), irec);
+    gen->link_instruction_jump(jump_rec, gen->get_future_ir_record_in_same_func(irec, label.idx));
+    return;
+  } else if (condition.kind == ConditionKind::ALWAYS_FALSE) {
+    // Never jump - no code generated at all
+    return;
+  }
+
   switch (condition.kind) {
     case ConditionKind::EQUAL:
       jump_instr = IGen::je_32();
@@ -903,6 +1018,8 @@ void IR_ConditionalBranch::do_codegen(emitter::ObjectGenerator* gen,
       ASSERT(false);
   }
 
+  // Only generate comparison if we have registers to compare
+  ASSERT(condition.a && condition.b);
   if (condition.is_float) {
     gen->add_instr(
         IGen::cmp_flt_flt(get_reg(condition.a, allocs, irec), get_reg(condition.b, allocs, irec)),
@@ -2019,4 +2136,74 @@ void IR_SqrtVF::do_codegen(emitter::ObjectGenerator* gen,
   auto dst = get_reg_asm(m_dst, allocs, irec, m_use_coloring);
   auto src = get_reg_asm(m_src, allocs, irec, m_use_coloring);
   gen->add_instr(IGen::sqrt_vf(dst, src), irec);
+}
+
+/////////////
+// IR_LEA
+/////////////
+
+IR_LEA::IR_LEA(LEAKind kind, RegVal* dest, RegVal* base, RegVal* index)
+    : m_kind(kind), m_dest(dest), m_base(base), m_index(index) {}
+
+std::string IR_LEA::print() {
+  std::string scale_str;
+  switch (m_kind) {
+    case LEAKind::BASE_PLUS_INDEX:
+      scale_str = "1";
+      break;
+    case LEAKind::BASE_PLUS_INDEX_TIMES2:
+      scale_str = "2";
+      break;
+    case LEAKind::BASE_PLUS_INDEX_TIMES4:
+      scale_str = "4";
+      break;
+    case LEAKind::BASE_PLUS_INDEX_TIMES8:
+      scale_str = "8";
+      break;
+  }
+  return fmt::format("lea {}, [{} + {} * {}]", m_dest->print(), m_base->print(), 
+                     m_index->print(), scale_str);
+}
+
+RegAllocInstr IR_LEA::to_rai() {
+  RegAllocInstr rai;
+  rai.write.push_back(m_dest->ireg());
+  rai.read.push_back(m_base->ireg());
+  if (m_base != m_index) {
+    rai.read.push_back(m_index->ireg());
+  }
+  return rai;
+}
+
+void IR_LEA::do_codegen(emitter::ObjectGenerator* gen,
+                        const AllocationResult& allocs,
+                        emitter::IR_Record irec) {
+  auto dest_reg = get_reg(m_dest, allocs, irec);
+  auto base_reg = get_reg(m_base, allocs, irec);
+  auto index_reg = get_reg(m_index, allocs, irec);
+  
+  // Use native x86 LEA instructions for efficient address calculation
+  switch (m_kind) {
+    case LEAKind::BASE_PLUS_INDEX:
+      if (base_reg == index_reg) {
+        // x + x = x * 2, use LEA with scale 2
+        gen->add_instr(IGen::lea_reg_plus_reg_times_scale(dest_reg, base_reg, index_reg, 2), irec);
+      } else {
+        // base + index, use LEA
+        gen->add_instr(IGen::lea_reg_plus_reg(dest_reg, base_reg, index_reg), irec);
+      }
+      break;
+    case LEAKind::BASE_PLUS_INDEX_TIMES2:
+      // base + index * 2
+      gen->add_instr(IGen::lea_reg_plus_reg_times_scale(dest_reg, base_reg, index_reg, 2), irec);
+      break;
+    case LEAKind::BASE_PLUS_INDEX_TIMES4:
+      // base + index * 4
+      gen->add_instr(IGen::lea_reg_plus_reg_times_scale(dest_reg, base_reg, index_reg, 4), irec);
+      break;
+    case LEAKind::BASE_PLUS_INDEX_TIMES8:
+      // base + index * 8
+      gen->add_instr(IGen::lea_reg_plus_reg_times_scale(dest_reg, base_reg, index_reg, 8), irec);
+      break;
+  }
 }

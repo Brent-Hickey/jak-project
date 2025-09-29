@@ -48,6 +48,10 @@ class IR_LoadConstant64 : public IR {
   void do_codegen(emitter::ObjectGenerator* gen,
                   const AllocationResult& allocs,
                   emitter::IR_Record irec) override;
+  
+  // Getters for peephole optimizer
+  const RegVal* get_dest() const { return m_dest; }
+  u64 get_value() const { return m_value; }
 
  protected:
   const RegVal* m_dest = nullptr;
@@ -62,6 +66,10 @@ class IR_LoadSymbolPointer : public IR {
   void do_codegen(emitter::ObjectGenerator* gen,
                   const AllocationResult& allocs,
                   emitter::IR_Record irec) override;
+  
+  // Getters for peephole optimizer
+  const RegVal* get_dest() const { return m_dest; }
+  const std::string& get_name() const { return m_name; }
 
  protected:
   const RegVal* m_dest = nullptr;
@@ -90,6 +98,9 @@ class IR_GetSymbolValue : public IR {
   void do_codegen(emitter::ObjectGenerator* gen,
                   const AllocationResult& allocs,
                   emitter::IR_Record irec) override;
+  
+  // Getters for peephole optimizer
+  const SymbolVal* get_src() const { return m_src; }
 
  protected:
   const RegVal* m_dest = nullptr;
@@ -105,6 +116,10 @@ class IR_RegSet : public IR {
   void do_codegen(emitter::ObjectGenerator* gen,
                   const AllocationResult& allocs,
                   emitter::IR_Record irec) override;
+  
+  // Getters for peephole optimizer
+  const RegVal* get_dest() const { return m_dest; }
+  const RegVal* get_src() const { return m_src; }
 
  protected:
   const RegVal* m_dest = nullptr;
@@ -124,6 +139,10 @@ class IR_FunctionCall : public IR {
                   const AllocationResult& allocs,
                   emitter::IR_Record irec) override;
   void add_constraints(std::vector<IRegConstraint>* constraints, int my_id) override;
+  
+  // Getters for peephole optimizer
+  const RegVal* get_func() const { return m_func; }
+  const std::vector<RegVal*>& get_args() const { return m_args; }
 
  protected:
   const RegVal* m_func = nullptr;
@@ -207,7 +226,8 @@ enum class IntegerMathKind {
   OR_64,
   AND_64,
   XOR_64,
-  NOT_64
+  NOT_64,
+  NEG_64
 };
 
 class IR_IntegerMath : public IR {
@@ -220,6 +240,11 @@ class IR_IntegerMath : public IR {
                   const AllocationResult& allocs,
                   emitter::IR_Record irec) override;
   IntegerMathKind get_kind() const { return m_kind; }
+  
+  // Getters for peephole optimizer
+  RegVal* get_dest() const { return m_dest; }
+  RegVal* get_arg() const { return m_arg; }
+  u8 get_shift_amount() const { return m_shift_amount; }
 
  protected:
   IntegerMathKind m_kind;
@@ -228,7 +253,15 @@ class IR_IntegerMath : public IR {
   u8 m_shift_amount = 0;
 };
 
-enum class FloatMathKind { DIV_SS, MUL_SS, ADD_SS, SUB_SS, MIN_SS, MAX_SS, SQRT_SS };
+enum class FloatMathKind { DIV_SS, MUL_SS, ADD_SS, SUB_SS, MIN_SS, MAX_SS, SQRT_SS, FMA_SS, FMS_SS };
+
+// LEA (Load Effective Address) optimization
+enum class LEAKind {
+  BASE_PLUS_INDEX,         // base + index
+  BASE_PLUS_INDEX_TIMES2,  // base + index*2 
+  BASE_PLUS_INDEX_TIMES4,  // base + index*4
+  BASE_PLUS_INDEX_TIMES8   // base + index*8
+};
 
 class IR_FloatMath : public IR {
  public:
@@ -239,6 +272,10 @@ class IR_FloatMath : public IR {
                   const AllocationResult& allocs,
                   emitter::IR_Record irec) override;
   FloatMathKind get_kind() const { return m_kind; }
+  
+  // Getters for peephole optimizer
+  RegVal* get_dest() const { return m_dest; }
+  RegVal* get_arg() const { return m_arg; }
 
  protected:
   FloatMathKind m_kind;
@@ -246,7 +283,53 @@ class IR_FloatMath : public IR {
   RegVal* m_arg;
 };
 
-enum class ConditionKind { NOT_EQUAL, EQUAL, LEQ, LT, GT, GEQ, INVALID_CONDITION };
+// 3-operand float math (for FMA/FMS instructions)
+class IR_FloatMath3 : public IR {
+ public:
+  IR_FloatMath3(FloatMathKind kind, RegVal* dest, RegVal* arg1, RegVal* arg2);
+  std::string print() override;
+  RegAllocInstr to_rai() override;
+  void do_codegen(emitter::ObjectGenerator* gen,
+                  const AllocationResult& allocs,
+                  emitter::IR_Record irec) override;
+  FloatMathKind get_kind() const { return m_kind; }
+  
+  // Getters for peephole optimizer
+  RegVal* get_dest() const { return m_dest; }
+  RegVal* get_arg1() const { return m_arg1; }
+  RegVal* get_arg2() const { return m_arg2; }
+
+ protected:
+  FloatMathKind m_kind;
+  RegVal* m_dest;
+  RegVal* m_arg1;
+  RegVal* m_arg2;
+};
+
+// LEA (Load Effective Address) IR for x86 optimization
+class IR_LEA : public IR {
+ public:
+  IR_LEA(LEAKind kind, RegVal* dest, RegVal* base, RegVal* index);
+  std::string print() override;
+  RegAllocInstr to_rai() override;
+  void do_codegen(emitter::ObjectGenerator* gen,
+                  const AllocationResult& allocs,
+                  emitter::IR_Record irec) override;
+  
+  // Getters for peephole optimizer
+  RegVal* get_dest() const { return m_dest; }
+  RegVal* get_base() const { return m_base; }
+  RegVal* get_index() const { return m_index; }
+  LEAKind get_kind() const { return m_kind; }
+
+ protected:
+  LEAKind m_kind;
+  RegVal* m_dest;
+  RegVal* m_base;
+  RegVal* m_index;
+};
+
+enum class ConditionKind { NOT_EQUAL, EQUAL, LEQ, LT, GT, GEQ, ALWAYS_TRUE, ALWAYS_FALSE, INVALID_CONDITION };
 
 struct Condition {
   ConditionKind kind = ConditionKind::INVALID_CONDITION;
@@ -387,6 +470,11 @@ class IR_LoadConstOffset : public IR_Asm {
   void do_codegen(emitter::ObjectGenerator* gen,
                   const AllocationResult& allocs,
                   emitter::IR_Record irec) override;
+  
+  // Getters for peephole optimizer
+  const RegVal* get_dest() const { return m_dest; }
+  int get_offset() const { return m_offset; }
+  const RegVal* get_base() const { return m_base; }
 
  private:
   const RegVal* m_dest = nullptr;
@@ -407,6 +495,11 @@ class IR_StoreConstOffset : public IR_Asm {
   void do_codegen(emitter::ObjectGenerator* gen,
                   const AllocationResult& allocs,
                   emitter::IR_Record irec) override;
+  
+  // Getters for peephole optimizer
+  const RegVal* get_value() const { return m_value; }
+  int get_offset() const { return m_offset; }
+  const RegVal* get_base() const { return m_base; }
 
  private:
   const RegVal* m_value = nullptr;

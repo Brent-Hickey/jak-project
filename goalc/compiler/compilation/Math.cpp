@@ -1,9 +1,11 @@
 #include <cfloat>
+#include <cmath>
 
 #include "common/goos/PrettyPrinter.h"
 #include "common/util/BitUtils.h"
 
 #include "goalc/compiler/Compiler.h"
+#include "goalc/compiler/MathOptimizer.h"
 
 MathMode Compiler::get_math_mode(const TypeSpec& ts) {
   if (m_ts.tc(m_ts.make_typespec("binteger"), ts)) {
@@ -122,19 +124,113 @@ Val* Compiler::compile_add(const goos::Object& form, const goos::Object& rest, E
   switch (math_type) {
     case MATH_INT:
     case MATH_BINT: {
+      // Check if all operands are constants for full constant folding
+      bool all_constants = true;
+      s64 constant_sum = 0;
+      
+      auto first_const = goalc::extract_integer_constant(first_val);
+      if (first_const.has_value()) {
+        constant_sum = first_const.value();
+      } else {
+        all_constants = false;
+      }
+      
+      if (all_constants) {
+        for (size_t i = 1; i < args.unnamed.size(); i++) {
+          auto val = compile_error_guard(args.unnamed.at(i), env);
+          auto const_val = goalc::extract_integer_constant(val);
+          if (const_val.has_value()) {
+            constant_sum += const_val.value();
+          } else {
+            all_constants = false;
+            break;
+          }
+        }
+      }
+      
+      if (all_constants) {
+        // All operands are constants - return folded constant
+        auto result = env->make_gpr(first_type);
+        env->emit_ir<IR_LoadConstant64>(form, result, constant_sum);
+        return result;
+      }
+      
+      // Handle binary addition identity optimizations for better code gen
+      if (args.unnamed.size() == 2) {
+        // Reuse the first_const from above if available, otherwise compute it
+        if (!first_const.has_value()) {
+          first_const = goalc::extract_integer_constant(first_val);
+        }
+        auto second_val = compile_error_guard(args.unnamed.at(1), env);
+        auto second_const = goalc::extract_integer_constant(second_val);
+        
+        if (first_const.has_value() && *first_const == 0) {
+          // 0 + x = x (identity - just move)
+          return second_val;
+        }
+        
+        if (second_const.has_value() && *second_const == 0) {
+          // x + 0 = x (identity - just move)
+          return first_val;
+        }
+      }
+      
+      // Regular compilation with optimizations
       auto result = env->make_gpr(first_type);
       env->emit_ir<IR_RegSet>(form, result, first_val->to_gpr(form, env));
 
       for (size_t i = 1; i < args.unnamed.size(); i++) {
+        auto val = compile_error_guard(args.unnamed.at(i), env);
+        
+        // Try enhanced optimization for single constant
+        auto const_val = goalc::extract_integer_constant(val);
+        if (const_val.has_value()) {
+          auto opt_result = goalc::MathOptimizer::optimize_add(0, *const_val);
+          
+          if (opt_result.optimized && opt_result.is_identity) {
+            // x + 0 = x (no-op)
+            continue;
+          }
+        }
+        
         env->emit_ir<IR_IntegerMath>(
             form, IntegerMathKind::ADD_64, result,
-            to_math_type(form, compile_error_guard(args.unnamed.at(i), env), math_type, env)
-                ->to_gpr(form, env));
+            to_math_type(form, val, math_type, env)->to_gpr(form, env));
       }
       return result;
     }
 
     case MATH_FLOAT: {
+      // Check if all operands are constants for full constant folding
+      bool all_constants = true;
+      float constant_sum = 0.0f;
+      
+      auto first_const = goalc::extract_float_constant(first_val);
+      if (first_const.has_value()) {
+        constant_sum = first_const.value();
+      } else {
+        all_constants = false;
+      }
+      
+      if (all_constants) {
+        for (size_t i = 1; i < args.unnamed.size(); i++) {
+          auto val = compile_error_guard(args.unnamed.at(i), env);
+          auto const_val = goalc::extract_float_constant(val);
+          if (const_val.has_value()) {
+            constant_sum += const_val.value();
+          } else {
+            all_constants = false;
+            break;
+          }
+        }
+      }
+      
+      if (all_constants) {
+        // All operands are constants - return folded constant
+        return compile_float(constant_sum, env, env->function_env()->segment_for_static_data())->to_fpr(form, env);
+      }
+      
+      // Regular compilation
       auto result = env->make_fpr(first_type);
       env->emit_ir<IR_RegSet>(form, result, first_val->to_fpr(form, env));
 
@@ -168,11 +264,173 @@ Val* Compiler::compile_mul(const goos::Object& form, const goos::Object& rest, E
   auto math_type = get_math_mode(first_type);
   switch (math_type) {
     case MATH_INT: {
+      // Check if all operands are constants for full constant folding
+      bool all_constants = true;
+      s64 constant_product = 1;
+      
+      auto first_const = goalc::extract_integer_constant(first_val);
+      if (first_const.has_value()) {
+        constant_product = first_const.value();
+      } else {
+        all_constants = false;
+      }
+      
+      if (all_constants) {
+        for (size_t i = 1; i < args.unnamed.size(); i++) {
+          auto val = compile_error_guard(args.unnamed.at(i), env);
+          auto const_val = goalc::extract_integer_constant(val);
+          if (const_val.has_value()) {
+            constant_product *= const_val.value();
+          } else {
+            all_constants = false;
+            break;
+          }
+        }
+      }
+      
+      if (all_constants) {
+        // All operands are constants - return folded constant
+        auto result = env->make_gpr(first_type);
+        env->emit_ir<IR_LoadConstant64>(form, result, constant_product);
+        return result;
+      }
+      
+      // Regular compilation with enhanced optimizations
       auto result = env->make_gpr(first_type);
       env->emit_ir<IR_RegSet>(form, result, first_val->to_gpr(form, env));
 
       for (size_t i = 1; i < args.unnamed.size(); i++) {
         auto val = compile_error_guard(args.unnamed.at(i), env);
+        
+        // Try enhanced optimization first
+        auto const_val = goalc::extract_integer_constant(val);
+        if (const_val.has_value()) {
+          // Direct check for common cases first
+          if (*const_val == 1) {
+            // x * 1 = x (identity, skip entirely)
+            continue;
+          } else if (*const_val == -1) {
+            // x * -1 = -x
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::NEG_64, result, nullptr);
+            continue;
+          } else if (*const_val == 0) {
+            // x * 0 = 0  
+            env->emit_ir<IR_LoadConstant64>(form, result, 0);
+            continue;
+          } else if (*const_val == 3) {
+            // x * 3 = lea result, [result + result*2] (single instruction)
+            env->emit_ir<IR_LEA>(form, LEAKind::BASE_PLUS_INDEX_TIMES2, result, result, result);
+            continue;
+          } else if (*const_val == 5) {
+            // x * 5 = lea result, [result + result*4] (single instruction)
+            env->emit_ir<IR_LEA>(form, LEAKind::BASE_PLUS_INDEX_TIMES4, result, result, result);
+            continue;
+          } else if (*const_val == 7) {
+            // x * 7 = (x << 3) - x = 8x - x (more efficient)
+            auto temp = env->make_gpr(first_type);
+            env->emit_ir<IR_RegSet>(form, temp, result);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, result, static_cast<u8>(3)); // 8x
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SUB_64, result, temp); // 8x - x
+            continue;
+          } else if (*const_val == 9) {
+            // x * 9 = lea result, [result + result*8] (single instruction)
+            env->emit_ir<IR_LEA>(form, LEAKind::BASE_PLUS_INDEX_TIMES8, result, result, result);
+            continue;
+          } else if (*const_val == 6) {
+            // x * 6 = (x << 1) + (x << 2) = 2x + 4x
+            auto temp1 = env->make_gpr(first_type);
+            auto temp2 = env->make_gpr(first_type);
+            env->emit_ir<IR_RegSet>(form, temp1, result);
+            env->emit_ir<IR_RegSet>(form, temp2, result);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, temp1, static_cast<u8>(1)); // 2x
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, temp2, static_cast<u8>(2)); // 4x
+            env->emit_ir<IR_RegSet>(form, result, temp1);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::ADD_64, result, temp2);
+            continue;
+          } else if (*const_val == 10) {
+            // x * 10 = (x << 1) + (x << 3) = 2x + 8x
+            auto temp1 = env->make_gpr(first_type);
+            auto temp2 = env->make_gpr(first_type);
+            env->emit_ir<IR_RegSet>(form, temp1, result);
+            env->emit_ir<IR_RegSet>(form, temp2, result);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, temp1, static_cast<u8>(1)); // 2x
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, temp2, static_cast<u8>(3)); // 8x
+            env->emit_ir<IR_RegSet>(form, result, temp1);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::ADD_64, result, temp2);
+            continue;
+          } else if (*const_val == 11) {
+            // x * 11 = x + (x << 1) + (x << 3) = x + 2x + 8x
+            auto temp1 = env->make_gpr(first_type);
+            auto temp2 = env->make_gpr(first_type);
+            env->emit_ir<IR_RegSet>(form, temp1, result);
+            env->emit_ir<IR_RegSet>(form, temp2, result);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, temp1, static_cast<u8>(1)); // 2x
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, temp2, static_cast<u8>(3)); // 8x
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::ADD_64, result, temp1);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::ADD_64, result, temp2);
+            continue;
+          } else if (*const_val == 12) {
+            // x * 12 = (x << 2) + (x << 3) = 4x + 8x
+            auto temp1 = env->make_gpr(first_type);
+            auto temp2 = env->make_gpr(first_type);
+            env->emit_ir<IR_RegSet>(form, temp1, result);
+            env->emit_ir<IR_RegSet>(form, temp2, result);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, temp1, static_cast<u8>(2)); // 4x
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, temp2, static_cast<u8>(3)); // 8x
+            env->emit_ir<IR_RegSet>(form, result, temp1);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::ADD_64, result, temp2);
+            continue;
+          } else if (*const_val == 13) {
+            // x * 13 = x + (x << 2) + (x << 3) = x + 4x + 8x
+            auto temp1 = env->make_gpr(first_type);
+            auto temp2 = env->make_gpr(first_type);
+            env->emit_ir<IR_RegSet>(form, temp1, result);
+            env->emit_ir<IR_RegSet>(form, temp2, result);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, temp1, static_cast<u8>(2)); // 4x
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, temp2, static_cast<u8>(3)); // 8x
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::ADD_64, result, temp1);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::ADD_64, result, temp2);
+            continue;
+          } else if (*const_val == 15) {
+            // x * 15 = (x << 4) - x = 16x - x
+            auto temp = env->make_gpr(first_type);
+            env->emit_ir<IR_RegSet>(form, temp, result);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, result, static_cast<u8>(4)); // 16x
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SUB_64, result, temp); // 16x - x
+            continue;
+          } else if (*const_val == 17) {
+            // x * 17 would need lea result, [result + result*16] but x86 LEA max scale is 8
+            // Keep the efficient shift+add pattern
+            auto temp = env->make_gpr(first_type);
+            env->emit_ir<IR_RegSet>(form, temp, result);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, temp, static_cast<u8>(4));
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::ADD_64, result, temp);
+            continue;
+          } else if (*const_val == 6) {
+            // x * 6 = (x * 2) + (x * 4) = x*2 + x*4
+            // lea temp, [x + x]; lea result, [temp + temp*2]
+            auto temp = env->make_gpr(first_type);
+            env->emit_ir<IR_LEA>(form, LEAKind::BASE_PLUS_INDEX, temp, result, result); // temp = x + x = 2x
+            env->emit_ir<IR_LEA>(form, LEAKind::BASE_PLUS_INDEX_TIMES2, result, temp, temp); // result = temp + temp*2 = 2x + 4x = 6x
+            continue;
+          } else if (*const_val == 10) {
+            // x * 10 = (x * 2) + (x * 8) = x*2 + x*8
+            // lea temp, [x + x]; lea result, [temp + temp*4]
+            auto temp = env->make_gpr(first_type);
+            env->emit_ir<IR_LEA>(form, LEAKind::BASE_PLUS_INDEX, temp, result, result); // temp = x + x = 2x
+            env->emit_ir<IR_LEA>(form, LEAKind::BASE_PLUS_INDEX_TIMES4, result, temp, temp); // result = temp + temp*4 = 2x + 8x = 10x
+            continue;
+          // NOTE: x*12 would need 3 LEAs - not worth it vs IMUL
+          // NOTE: x*18, x*20, x*24 removed as they need 3+ LEAs - IMUL is faster
+          } else if (goalc::MathOptimizer::is_power_of_two(*const_val)) {
+            // x * 2^n = x << n
+            int shift = goalc::MathOptimizer::get_power_of_two_exponent(*const_val);
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, result, static_cast<u8>(shift));
+            continue;
+          }
+        }
+        
+        // Fallback to existing power-of-2 check for compatibility
         auto val_as_int = dynamic_cast<IntegerConstantVal*>(val);
         int power_of_two = -1;
         if (val_as_int && val_as_int->value().uses_gpr() && val_as_int->value().value_64() > 0) {
@@ -183,15 +441,49 @@ Val* Compiler::compile_mul(const goos::Object& form, const goos::Object& rest, E
         }
 
         if (power_of_two >= 0) {
-          env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, result, power_of_two);
+          env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHL_64, result, static_cast<u8>(power_of_two));
         } else {
-          env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::IMUL_32, result,
+          env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::IMUL_64, result,
                                        to_math_type(form, val, math_type, env)->to_gpr(form, env));
         }
       }
       return result;
     }
     case MATH_FLOAT: {
+      // Check if all operands are constants for full constant folding
+      bool all_constants = true;
+      float constant_product = 1.0f;
+      
+      auto first_const = goalc::extract_float_constant(first_val);
+      if (first_const.has_value()) {
+        constant_product = first_const.value();
+      } else {
+        all_constants = false;
+      }
+      
+      if (all_constants) {
+        for (size_t i = 1; i < args.unnamed.size(); i++) {
+          auto val = compile_error_guard(args.unnamed.at(i), env);
+          auto const_val = goalc::extract_float_constant(val);
+          if (const_val.has_value()) {
+            constant_product *= const_val.value();
+          } else {
+            all_constants = false;
+            break;
+          }
+        }
+      }
+      
+      if (all_constants) {
+        // All operands are constants - return folded constant
+        return compile_float(constant_product, env, env->function_env()->segment_for_static_data())->to_fpr(form, env);
+      }
+      
+      // DISABLED: Square pattern detection temporarily disabled due to performance regression
+      // The to_fpr() calls in this optimization are causing significant performance loss
+      // TODO: Implement square pattern detection at the peephole optimization level instead
+      
+      // Regular compilation
       auto result = env->make_fpr(first_type);
       env->emit_ir<IR_RegSet>(form, result, first_val->to_fpr(form, env));
 
@@ -224,6 +516,8 @@ Val* Compiler::compile_fmin(const goos::Object& form, const goos::Object& rest, 
   if (get_math_mode(first_val->type()) != MATH_FLOAT) {
     throw_compiler_error(form, "Must use floats in fmin");
   }
+  
+  // Regular compilation
   auto result = env->make_fpr(first_val->type());
   env->emit_ir<IR_RegSet>(form, result, first_val->to_fpr(form, env));
   for (size_t i = 1; i < args.unnamed.size(); i++) {
@@ -247,6 +541,8 @@ Val* Compiler::compile_fmax(const goos::Object& form, const goos::Object& rest, 
   if (get_math_mode(first_val->type()) != MATH_FLOAT) {
     throw_compiler_error(form, "Must use floats in fmax");
   }
+  
+  // Regular compilation
   auto result = env->make_fpr(first_val->type());
   env->emit_ir<IR_RegSet>(form, result, first_val->to_fpr(form, env));
   for (size_t i = 1; i < args.unnamed.size(); i++) {
@@ -267,6 +563,8 @@ Val* Compiler::compile_sqrtf(const goos::Object& form, const goos::Object& rest,
   if (get_math_mode(first_val->type()) != MATH_FLOAT) {
     throw_compiler_error(form, "Must use a float for sqrtf");
   }
+  
+  // Regular compilation
   auto result = env->make_fpr(first_val->type());
   env->emit_ir<IR_FloatMath>(form, FloatMathKind::SQRT_SS, result, first_val->to_fpr(form, env));
   return result;
@@ -443,39 +741,96 @@ Val* Compiler::compile_div(const goos::Object& form, const goos::Object& rest, E
       env->emit_ir<IR_RegSet>(form, result, first_thing);
 
       auto val = compile_error_guard(args.unnamed.at(1), env);
-      auto val_as_int = dynamic_cast<IntegerConstantVal*>(val);
-      int power_of_two = -1;
-      if (val_as_int && val_as_int->value().uses_gpr() && val_as_int->value().value_64() > 0) {
-        auto p = get_power_of_two(val_as_int->value().value_64());
-        if (p) {
-          power_of_two = *p;
+      
+      // Try enhanced division optimization
+      auto const_val = goalc::extract_integer_constant(val);
+      bool optimized = false;
+      if (const_val.has_value()) {
+        if (*const_val == 1) {
+          // x / 1 = x (identity, no-op)
+          optimized = true;
+        } else if (*const_val == -1) {
+          // x / -1 = -x
+          env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::NEG_64, result, nullptr);
+          optimized = true;
+        } else if (goalc::MathOptimizer::is_power_of_two(std::abs(*const_val))) {
+          // x / ±2^n = x >> n (with negation if needed)
+          int shift = goalc::MathOptimizer::get_power_of_two_exponent(std::abs(*const_val));
+          if (is_singed_integer_or_binteger(first_type)) {
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SAR_64, result, static_cast<u8>(shift));
+          } else {
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHR_64, result, static_cast<u8>(shift));
+          }
+          if (*const_val < 0) {
+            // Negative divisor: negate the result
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::NEG_64, result, nullptr);
+          }
+          optimized = true;
         }
       }
-
-      if (power_of_two >= 0) {
-        if (is_singed_integer_or_binteger(first_type)) {
-          env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SAR_64, result, power_of_two);
-        } else {
-          env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHR_64, result, power_of_two);
-        }
-      } else {
-        IRegConstraint result_rax_constraint;
-        result_rax_constraint.instr_idx = fe->code().size();
-        result_rax_constraint.ireg = result->ireg();
-        result_rax_constraint.desired_register = emitter::RAX;
-        fe->constrain(result_rax_constraint);
-
-        if (is_singed_integer_or_binteger(first_type)) {
-          env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::IDIV_32, result,
-                                       to_math_type(form, val, math_type, env)->to_gpr(form, env));
-        } else {
-          env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::UDIV_32, result,
-                                       to_math_type(form, val, math_type, env)->to_gpr(form, env));
+      
+      if (!optimized) {
+        // Fallback to existing power-of-2 check for compatibility
+        auto val_as_int = dynamic_cast<IntegerConstantVal*>(val);
+        int power_of_two = -1;
+        if (val_as_int && val_as_int->value().uses_gpr() && val_as_int->value().value_64() > 0) {
+          auto p = get_power_of_two(val_as_int->value().value_64());
+          if (p) {
+            power_of_two = *p;
+          }
         }
 
-        auto result_moved = env->make_gpr(first_type);
-        env->emit_ir<IR_RegSet>(form, result_moved, result);
-        return result_moved;
+        if (power_of_two >= 0) {
+          if (is_singed_integer_or_binteger(first_type)) {
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SAR_64, result, static_cast<u8>(power_of_two));
+          } else {
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHR_64, result, static_cast<u8>(power_of_two));
+          }
+        } else if (const_val.has_value()) {
+          // Try magic number division for common non-power-of-2 divisors
+          auto magic_result = goalc::MathOptimizer::optimize_magic_division(*const_val);
+          if (magic_result.optimized && magic_result.is_magic_division) {
+            // Implement magic division: result = (value * magic) >> shift
+            auto magic_reg = env->make_gpr(first_type);
+            env->emit_ir<IR_LoadConstant64>(form, magic_reg, magic_result.magic_number);
+            
+            // Use high multiplication (result in RDX)
+            IRegConstraint result_rdx_constraint;
+            result_rdx_constraint.instr_idx = fe->code().size();
+            result_rdx_constraint.ireg = result->ireg();
+            result_rdx_constraint.desired_register = emitter::RDX;
+            fe->constrain(result_rdx_constraint);
+            
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::IMUL_64, result, magic_reg);
+            
+            // Shift right by the required amount
+            if (magic_result.shift_amount > 0) {
+              env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::SHR_64, result, 
+                                         static_cast<u8>(magic_result.shift_amount));
+            }
+            optimized = true;
+          }
+        }
+        
+        if (!optimized) {
+          IRegConstraint result_rax_constraint;
+          result_rax_constraint.instr_idx = fe->code().size();
+          result_rax_constraint.ireg = result->ireg();
+          result_rax_constraint.desired_register = emitter::RAX;
+          fe->constrain(result_rax_constraint);
+
+          if (is_singed_integer_or_binteger(first_type)) {
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::IDIV_32, result,
+                                         to_math_type(form, val, math_type, env)->to_gpr(form, env));
+          } else {
+            env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::UDIV_32, result,
+                                         to_math_type(form, val, math_type, env)->to_gpr(form, env));
+          }
+
+          auto result_moved = env->make_gpr(first_type);
+          env->emit_ir<IR_RegSet>(form, result_moved, result);
+          return result_moved;
+        }
       }
 
       return result;
@@ -483,6 +838,27 @@ Val* Compiler::compile_div(const goos::Object& form, const goos::Object& rest, E
 
     case MATH_FLOAT: {
       const auto& divisor = args.unnamed.at(1);
+      
+      // OPTIMIZATION: Detect reciprocal square root pattern (/ 1.0 (sqrtf x))
+      // This is extremely common in vector normalization
+      if (args.unnamed.at(0).is_float() && args.unnamed.at(0).as_float() == 1.0f) {
+        // Check if divisor is a sqrtf call
+        if (divisor.is_list() && !divisor.as_pair()->cdr.is_empty_list()) {
+          auto divisor_list = divisor.as_pair();
+          if (divisor_list->car.is_symbol() && 
+              symbol_string(divisor_list->car) == "sqrtf") {
+            // This is (/ 1.0 (sqrtf x)) - reciprocal square root!
+            // For now, generate regular division but mark for future SIMD optimization
+            // Modern CPUs have RSQRTSS instruction which is much faster
+            auto a = first_val->to_fpr(form, env);
+            auto b = to_math_type(form, compile_error_guard(divisor, env), math_type, env)
+                         ->to_fpr(form, env);
+            return compile_floating_point_division(form, first_type, a, b, env,
+                                                   divisor.is_float() && !divisor.is_float(0));
+          }
+        }
+      }
+      
       // in original GOAL, immediate divisions were turned into inverse multiplications
       if (divisor.is_float() && !divisor.is_float(0) && divisor.is_power_of_2_float()) {
         // TODO eventually this should be smarter somehow
@@ -614,18 +990,40 @@ Val* Compiler::compile_mod(const goos::Object& form, const goos::Object& rest, E
   auto args = get_va(form, rest);
   va_check(form, args, {{}, {}}, {});
   auto first = compile_error_guard(args.unnamed.at(0), env)->to_gpr(form, env);
-  auto second = compile_error_guard(args.unnamed.at(1), env)->to_gpr(form, env);
+  auto second_val = compile_error_guard(args.unnamed.at(1), env);
   auto fenv = env->function_env();
 
   if (get_math_mode(first->type()) != MathMode::MATH_INT ||
-      get_math_mode(second->type()) != MathMode::MATH_INT) {
+      get_math_mode(second_val->type()) != MathMode::MATH_INT) {
     throw_compiler_error(form, "Cannot mod a {} by a {}.", first->type().print(),
-                         second->type().print());
+                         second_val->type().print());
   }
 
   auto result = env->make_gpr(first->type());
   env->emit_ir<IR_RegSet>(form, result, first);
 
+  // Try enhanced modulo optimization
+  auto const_val = goalc::extract_integer_constant(second_val);
+  if (const_val.has_value()) {
+    if (*const_val == 1) {
+      // x % 1 = 0 (always)
+      env->emit_ir<IR_LoadConstant64>(form, result, 0);
+      return result;
+    } else if (goalc::MathOptimizer::is_power_of_two(*const_val) && *const_val > 0) {
+      // x % 2^n = x & (2^n - 1) for unsigned or positive signed
+      if (!is_singed_integer_or_binteger(first->type()) || *const_val > 0) {
+        s64 mask_value = *const_val - 1;
+        auto mask_reg = env->make_gpr(result->type());
+        env->emit_ir<IR_LoadConstant64>(form, mask_reg, mask_value);
+        env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::AND_64, result, mask_reg);
+        return result;
+      }
+    }
+  }
+
+  // Fallback to standard division-based modulo
+  auto second = second_val->to_gpr(form, env);
+  
   IRegConstraint con;
   con.ireg = result->ireg();
   con.instr_idx = fenv->code().size();
@@ -646,8 +1044,11 @@ Val* Compiler::compile_mod(const goos::Object& form, const goos::Object& rest, E
 Val* Compiler::compile_logand(const goos::Object& form, const goos::Object& rest, Env* env) {
   auto args = get_va(form, rest);
   va_check(form, args, {{}, {}}, {});
-  auto first = compile_error_guard(args.unnamed.at(0), env)->to_gpr(form, env);
-  auto second = compile_error_guard(args.unnamed.at(1), env)->to_gpr(form, env);
+  auto first = compile_error_guard(args.unnamed.at(0), env);
+  auto second = compile_error_guard(args.unnamed.at(1), env);
+  
+  auto first_gpr = first->to_gpr(form, env);
+  auto second_gpr = second->to_gpr(form, env);
   auto math_1 = get_math_mode(first->type());
   auto math_2 = get_math_mode(second->type());
   if (!((math_1 == MathMode::MATH_INT && math_2 == MathMode::MATH_INT) ||
@@ -657,11 +1058,55 @@ Val* Compiler::compile_logand(const goos::Object& form, const goos::Object& rest
                          second->type().print());
   }
 
+  // Only do constant folding and identity optimizations for pure integer & integer cases
+  if (math_1 == MathMode::MATH_INT && math_2 == MathMode::MATH_INT) {
+    auto first_const = goalc::extract_integer_constant(first);
+    auto second_const = goalc::extract_integer_constant(second);
+    
+    if (first_const.has_value() && second_const.has_value()) {
+      // Both constants - fold at compile time
+      s64 result_val = first_const.value() & second_const.value();
+      auto result = env->make_gpr(first->type());
+      env->emit_ir<IR_LoadConstant64>(form, result, result_val);
+      return result;
+    }
+    
+    // Identity optimizations
+    if (first_const.has_value()) {
+      if (*first_const == 0) {
+        // 0 & x = 0
+        auto result = env->make_gpr(first->type());
+        env->emit_ir<IR_LoadConstant64>(form, result, 0);
+        return result;
+      } else if (*first_const == -1) {
+        // -1 & x = x (identity - just move)
+        return second;
+      }
+    }
+    
+    if (second_const.has_value()) {
+      if (*second_const == 0) {
+        // x & 0 = 0
+        auto result = env->make_gpr(first->type());
+        env->emit_ir<IR_LoadConstant64>(form, result, 0);
+        return result;
+      } else if (*second_const == -1) {
+        // x & -1 = x (identity - just move)
+        return first;
+      }
+    }
+    
+    // x & x = x (identity - just move)
+    if (first == second) {
+      return first;
+    }
+  }
+
   // kind of a hack, but make (logand int pointer) return pointer.
   auto result =
       env->make_gpr(m_ts.tc(TypeSpec("pointer"), second->type()) ? second->type() : first->type());
-  env->emit_ir<IR_RegSet>(form, result, first);
-  env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::AND_64, result, second);
+  env->emit_ir<IR_RegSet>(form, result, first_gpr);
+  env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::AND_64, result, second_gpr);
   return result;
 }
 
@@ -682,6 +1127,38 @@ Val* Compiler::compile_logior(const goos::Object& form, const goos::Object& rest
       throw_compiler_error(form, "Cannot logior a {} by a {}.", first->type().print(),
                            sec->type().print());
     }
+    
+    // For binary case with pure integers, try constant folding and identity optimizations
+    if (args.unnamed.size() == 2 && is_integer(first->type()) && is_integer(sec->type())) {
+      auto first_val = compile_error_guard(args.unnamed.at(0), env);
+      auto first_const = goalc::extract_integer_constant(first_val);
+      auto sec_const = goalc::extract_integer_constant(sec);
+      
+      if (first_const.has_value() && sec_const.has_value()) {
+        // Both constants - fold at compile time
+        s64 result_val = first_const.value() | sec_const.value();
+        auto folded_result = env->make_gpr(first->type());
+        env->emit_ir<IR_LoadConstant64>(form, folded_result, result_val);
+        return folded_result;
+      }
+      
+      // Identity optimizations  
+      if (first_const.has_value() && *first_const == 0) {
+        // 0 | x = x (identity - just move)
+        return sec;
+      }
+      
+      if (sec_const.has_value() && *sec_const == 0) {
+        // x | 0 = x (identity - just move)
+        return first_val;
+      }
+      
+      // x | x = x (identity - just move)
+      if (first_val == sec) {
+        return first_val;
+      }
+    }
+    
     env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::OR_64, result, sec->to_gpr(form, env));
   }
   return result;
@@ -690,17 +1167,50 @@ Val* Compiler::compile_logior(const goos::Object& form, const goos::Object& rest
 Val* Compiler::compile_logxor(const goos::Object& form, const goos::Object& rest, Env* env) {
   auto args = get_va(form, rest);
   va_check(form, args, {{}, {}}, {});
-  auto first = compile_error_guard(args.unnamed.at(0), env)->to_gpr(form, env);
-  auto second = compile_error_guard(args.unnamed.at(1), env)->to_gpr(form, env);
+  auto first = compile_error_guard(args.unnamed.at(0), env);
+  auto second = compile_error_guard(args.unnamed.at(1), env);
+  
+  auto first_gpr = first->to_gpr(form, env);
+  auto second_gpr = second->to_gpr(form, env);
   if (get_math_mode(first->type()) != MathMode::MATH_INT ||
       get_math_mode(second->type()) != MathMode::MATH_INT) {
     throw_compiler_error(form, "Cannot logxor a {} by a {}.", first->type().print(),
                          second->type().print());
   }
 
+  // Only do constant folding and identity optimizations for pure integers (after type check)
+  auto first_const = goalc::extract_integer_constant(first);
+  auto second_const = goalc::extract_integer_constant(second);
+  
+  if (first_const.has_value() && second_const.has_value()) {
+    // Both constants - fold at compile time
+    s64 result_val = first_const.value() ^ second_const.value();
+    auto result = env->make_gpr(first->type());
+    env->emit_ir<IR_LoadConstant64>(form, result, result_val);
+    return result;
+  }
+  
+  // Identity optimizations
+  if (first_const.has_value() && *first_const == 0) {
+    // 0 ^ x = x (identity - just move)
+    return second;
+  }
+  
+  if (second_const.has_value() && *second_const == 0) {
+    // x ^ 0 = x (identity - just move) 
+    return first;
+  }
+  
+  // x ^ x = 0 (zero-idiom optimization)
+  if (first == second) {
+    auto result = env->make_gpr(first->type());
+    env->emit_ir<IR_LoadConstant64>(form, result, 0);
+    return result;
+  }
+
   auto result = env->make_gpr(first->type());
-  env->emit_ir<IR_RegSet>(form, result, first);
-  env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::XOR_64, result, second);
+  env->emit_ir<IR_RegSet>(form, result, first_gpr);
+  env->emit_ir<IR_IntegerMath>(form, IntegerMathKind::XOR_64, result, second_gpr);
   return result;
 }
 

@@ -11,6 +11,7 @@ struct CpuInfo {
   bool initialized = false;
   bool has_avx = false;
   bool has_avx2 = false;
+  bool has_fma = false;
 
   std::string brand;
   std::string model;

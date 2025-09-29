@@ -1028,6 +1028,36 @@ class IGen {
     }
   }
 
+  // LEA with base + index addressing: dest = base + index
+  static Instruction lea_reg_plus_reg(Register dest, Register base, Register index) {
+    ASSERT(dest.is_gpr());
+    ASSERT(base.is_gpr());
+    ASSERT(index.is_gpr());
+    Instruction instr(0x8d);
+    instr.set_modrm_and_rex_for_reg_plus_reg_addr(dest.hw_id(), base.hw_id(), index.hw_id(), true);
+    return instr;
+  }
+
+  // LEA with base + index*scale addressing: dest = base + index*scale
+  static Instruction lea_reg_plus_reg_times_scale(Register dest, Register base, Register index, int scale) {
+    ASSERT(dest.is_gpr());
+    ASSERT(base.is_gpr());
+    ASSERT(index.is_gpr());
+    ASSERT(scale == 1 || scale == 2 || scale == 4 || scale == 8);
+    
+    Instruction instr(0x8d);
+    u8 scale_bits = 0;
+    switch (scale) {
+      case 1: scale_bits = 0; break;
+      case 2: scale_bits = 1; break;
+      case 4: scale_bits = 2; break;
+      case 8: scale_bits = 3; break;
+      default: ASSERT(false);
+    }
+    instr.set_modrm_and_rex_for_reg_plus_reg_times_scale_addr(dest.hw_id(), base.hw_id(), index.hw_id(), scale_bits, true);
+    return instr;
+  }
+
   static Instruction store32_xmm32_gpr64_plus_s32(Register base, Register xmm_value, s64 offset) {
     ASSERT(xmm_value.is_xmm());
     ASSERT(base.is_gpr());
@@ -2004,6 +2034,59 @@ class IGen {
     instr.set_op3(0x58);
     instr.set_modrm_and_rex(dst.hw_id(), src.hw_id(), 3, false);
     instr.swap_op0_rex();
+    return instr;
+  }
+
+  /*!
+   * FMA: dst = dst + (src1 * src2) using vfmadd231ss (scalar single-precision)
+   * Requires FMA3 support. VEX.NDS.LIG.66.0F38.W0 B9 /r
+   * Note: This modifies dst and reads all three operands
+   */
+  static Instruction vfmadd231ss_xmm_xmm_xmm(Register dst, Register src1, Register src2) {
+    ASSERT(dst.is_xmm());
+    ASSERT(src1.is_xmm());
+    ASSERT(src2.is_xmm());
+    
+    Instruction instr(0xB9);  // FMA opcode
+    // Use VEX3 encoding for FMA
+    // Map: 0F38, W=0, vvvv=src1, L=0 (scalar), pp=01 (66 prefix)
+    VEX3 vex(false,                             // W=0 for 32-bit
+             !(src2.hw_id() & 8),                // R (inverted extension of ModRM reg)
+             true,                               // X=1 (not used but set)
+             !(dst.hw_id() & 8),                 // B (inverted extension of ModRM r/m)
+             VEX3::LeadingBytes::P_0F_38,        // 0F38 map for FMA
+             src1.hw_id() & 0xF,                 // vvvv = src1 register
+             VexPrefix::P_66,                    // pp=01 for 66 prefix
+             false);                             // L=0 for scalar
+    
+    instr.set(vex);
+    instr.set_modrm_and_rex(dst.hw_id() & 7, src2.hw_id() & 7, 3, false);
+    
+    return instr;
+  }
+
+  /*!
+   * FMS: dst = dst - (src1 * src2) using vfmsub231ss (scalar single-precision)
+   * Requires FMA3 support. VEX.NDS.LIG.66.0F38.W0 BB /r
+   */
+  static Instruction vfmsub231ss_xmm_xmm_xmm(Register dst, Register src1, Register src2) {
+    ASSERT(dst.is_xmm());
+    ASSERT(src1.is_xmm());
+    ASSERT(src2.is_xmm());
+    
+    Instruction instr(0xBB);  // FMS opcode
+    VEX3 vex(false,                             // W=0 for 32-bit
+             !(src2.hw_id() & 8),                // R (inverted extension of ModRM reg)
+             true,                               // X=1 (not used but set)
+             !(dst.hw_id() & 8),                 // B (inverted extension of ModRM r/m)
+             VEX3::LeadingBytes::P_0F_38,        // 0F38 map for FMA
+             src1.hw_id() & 0xF,                 // vvvv = src1 register
+             VexPrefix::P_66,                    // pp=01 for 66 prefix
+             false);                             // L=0 for scalar
+    
+    instr.set(vex);
+    instr.set_modrm_and_rex(dst.hw_id() & 7, src2.hw_id() & 7, 3, false);
+    
     return instr;
   }
 

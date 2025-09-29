@@ -6,6 +6,7 @@
 #include "common/goos/ParseHelpers.h"
 
 #include "goalc/compiler/Compiler.h"
+#include "goalc/compiler/MathOptimizer.h"
 
 /*!
  * Convert an expression into a GoalCondition for use in a conditional branch.
@@ -116,7 +117,50 @@ Condition Compiler::compile_condition(const goos::Object& condition, Env* env, b
   // not something we can process more.  Just evaluate as normal and check if we get false.
   // todo - it's possible to optimize a false comparison because the false offset is zero
   gc.kind = invert ? ConditionKind::EQUAL : ConditionKind::NOT_EQUAL;
-  gc.a = compile_error_guard(condition, env)->to_gpr(condition, env);
+  auto condition_val = compile_error_guard(condition, env);
+  
+  // OPTIMIZATION: Check for constant condition values
+  if (auto int_const = goalc::extract_integer_constant(condition_val)) {
+    auto opt_result = goalc::MathOptimizer::optimize_branch_condition(*int_const);
+    if (opt_result.optimized) {
+      bool condition_result = (opt_result.constant_result != 0);
+      if (invert) condition_result = !condition_result;
+      
+      // Use special condition kinds that generate no comparison code
+      if (condition_result) {
+        gc.kind = ConditionKind::ALWAYS_TRUE;
+        // No registers needed for always true/false
+        gc.a = nullptr;
+        gc.b = nullptr;
+      } else {
+        gc.kind = ConditionKind::ALWAYS_FALSE;
+        gc.a = nullptr;
+        gc.b = nullptr;
+      }
+      return gc;
+    }
+  }
+  
+  if (auto float_const = goalc::extract_float_constant(condition_val)) {
+    auto opt_result = goalc::MathOptimizer::optimize_float_branch_condition(*float_const);
+    if (opt_result.optimized) {
+      bool condition_result = (opt_result.constant_result != 0);
+      if (invert) condition_result = !condition_result;
+      
+      if (condition_result) {
+        gc.kind = ConditionKind::ALWAYS_TRUE;
+        gc.a = nullptr;
+        gc.b = nullptr;
+      } else {
+        gc.kind = ConditionKind::ALWAYS_FALSE;
+        gc.a = nullptr;
+        gc.b = nullptr;
+      }
+      return gc;
+    }
+  }
+  
+  gc.a = condition_val->to_gpr(condition, env);
   if (gc.a->type() == TypeSpec("none")) {
     throw_compiler_error(condition, "Cannot use none-typed variable in a condition.");
   }
